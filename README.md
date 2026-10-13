@@ -17,6 +17,7 @@ fmp install
 
 ```flame
 import mold
+import std.json
 
 let db = mold.open("app.db")
 
@@ -24,11 +25,12 @@ let db = mold.open("app.db")
 db.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
 
 // Insert data with parameters
-db.executeParams("INSERT INTO users (name, age) VALUES (?1, ?2)", '["Alice", 30]')
+db.executeParams("INSERT INTO users (name, age) VALUES (?1, ?2)", [text("Alice"), integer(30)])
 
-// Query rows as JSON
+// Queries return JSON text; parse it to access rows and columns.
 let rows = db.query("SELECT * FROM users")
-println(rows)
+let users = json.parse(rows)
+println(users[0].name)
 
 db.close()
 ```
@@ -58,11 +60,11 @@ let readOnlyDb = mold.openWithFlags("app.db", true, false)
 // Without parameters
 let changes = db.execute("DELETE FROM users WHERE age < 18")
 
-// With positional parameters (JSON array string)
-db.executeParams("INSERT INTO users (name, age) VALUES (?1, ?2)", '["Bob", 25]')
+// With positional parameters (typed array)
+db.executeParams("INSERT INTO users (name, age) VALUES (?1, ?2)", [text("Bob"), integer(25)])
 
-// With named parameters (JSON object string)
-db.executeParams("INSERT INTO users (name, age) VALUES (:name, :age)", '{"name": "Charlie", "age": 28}')
+// Legacy JSON parameters are also accepted by executeParamsJson
+db.executeParamsJson("INSERT INTO users (name, age) VALUES (:name, :age)", '{"name": "Charlie", "age": 28}')
 
 // Execute multiple statements (schema setup, migrations)
 db.executeBatch("CREATE TABLE a (id INT); CREATE TABLE b (id INT);")
@@ -70,19 +72,29 @@ db.executeBatch("CREATE TABLE a (id INT); CREATE TABLE b (id INT);")
 
 ### Query (SELECT)
 
-All query results are returned as JSON strings.
+`query` and `queryParams` return JSON strings containing an array of row objects. Use `std.json` to parse the result before accessing a row or column. Positional query parameters are typed arrays of `SqlParam` values.
 
 ```flame
+import std.json
+
 // Query all rows
 let allRows = db.query("SELECT * FROM users")
 // Output: [{"age":30,"id":1,"name":"Alice"},{"age":25,"id":2,"name":"Bob"}]
+let users = json.parse(allRows)
+let firstName = users[0].name
+// Output: Alice
 
 // Query with parameters
-let adultUsers = db.queryParams("SELECT * FROM users WHERE age >= ?1", '[21]')
+let adultUsers = db.queryParams("SELECT * FROM users WHERE age >= ?1", [integer(21)])
+let adults = json.parse(adultUsers)
 
 // Query a single row
-let user = db.queryRow("SELECT * FROM users WHERE id = ?1", '[1]')
+let user = db.queryRow("SELECT * FROM users WHERE id = ?1", [integer(1)])
 // Output: {"age":30,"id":1,"name":"Alice"}
+
+// Extract just one column as a plain string
+let name = db.queryString("SELECT name FROM users ORDER BY id DESC LIMIT 1", [])
+// Output: Alice
 ```
 
 ---
@@ -95,7 +107,7 @@ Reuse compiled statements for queries and schema inspection:
 let stmt = db.prepare("SELECT name FROM users WHERE age > ?1")
 
 // Query rows
-let rows = stmt.query('[20]')
+let rows = stmt.query([integer(20)])
 
 // Inspect statement schema
 let count = stmt.columnCount()      // Number of result columns
@@ -104,7 +116,7 @@ let sql = stmt.sql()                // Original SQL query text
 
 // Execute update with statement
 let insertStmt = db.prepare("INSERT INTO users (name, age) VALUES (?1, ?2)")
-insertStmt.execute('["David", 35]')
+insertStmt.execute([text("David"), integer(35)])
 ```
 
 ---
@@ -172,4 +184,3 @@ db.close()
 let version = mold.sqliteVersion()
 println("SQLite version: " + version)
 ```
-

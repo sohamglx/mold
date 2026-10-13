@@ -15,7 +15,7 @@ import mold
 
 let db = mold.open(\"app.db\")
 db.execute(\"CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)\")
-db.executeParams(\"INSERT INTO users (name, age) VALUES (?1, ?2)\", '[\"Alice\", 30]')
+db.executeParams(\"INSERT INTO users (name, age) VALUES (?1, ?2)\", [text(\"Alice\"), integer(30)])
 let rows = db.query(\"SELECT * FROM users\")
 println(rows)
 db.close()
@@ -45,13 +45,48 @@ export struct ColumnInfo {
     pk: Int
 }
 
+@Docs("A typed SQLite parameter for use in positional parameter arrays.")
+export struct SqlParam {
+    jsonValue: String
+}
+
+@Docs("Create a text SQL parameter.")
+export fn text(value: String) -> SqlParam {
+    return SqlParam { jsonValue: json.stringify(value) }
+}
+
+@Docs("Create an integer SQL parameter.")
+export fn integer(value: Int) -> SqlParam {
+    return SqlParam { jsonValue: json.stringify(value) }
+}
+
+@Docs("Create a floating-point SQL parameter.")
+export fn real(value: Float) -> SqlParam {
+    return SqlParam { jsonValue: json.stringify(value) }
+}
+
+@Docs("Create a boolean SQL parameter.")
+export fn boolean(value: Bool) -> SqlParam {
+    return SqlParam { jsonValue: json.stringify(value) }
+}
+
+@Docs("Create a NULL SQL parameter.")
+export fn nullParam() -> SqlParam {
+    return SqlParam { jsonValue: "null" }
+}
+
+fn paramsToJson(params: [SqlParam]) -> String {
+    let values = params.map((param: SqlParam) -> String { param.jsonValue })
+    return "[" + values.join(",") + "]"
+}
+
 @Docs("
 ### Statement
 A pre-compiled SQLite statement handle for repeated, high-performance execution.
 
 ```flame
 let stmt = db.prepare(\"SELECT * FROM users WHERE id = ?1\")
-let row = stmt.query('[\"101\"]')
+let row = stmt.query([integer(101)])
 ```
 ")
 export struct Statement {
@@ -71,23 +106,31 @@ impl Statement {
     }
 
     @Docs("
-    Executes the prepared statement with JSON parameters (positional array `[val1, val2]` or named object `{\"name\": val}`).
+    Executes the prepared statement with typed positional parameters.
     Returns the count of modified rows (-1 on error).
     ```flame
-    let count = stmt.execute('[\"Alice\", 25]')
+    let count = stmt.execute([text(\"Alice\"), integer(25)])
     ```
     ")
-    fn execute(&self, paramsJson: String) -> Int {
+    fn execute(&self, params: [SqlParam]) -> Int {
+        return self.db.execute_params(self.sqlText, paramsToJson(params))
+    }
+
+    fn executeJson(&self, paramsJson: String) -> Int {
         return self.db.execute_params(self.sqlText, paramsJson)
     }
 
     @Docs("
-    Executes a query using the prepared statement with JSON parameters, returning all matching rows as a JSON array string.
+    Executes a query using typed positional parameters, returning all matching rows as a JSON array string.
     ```flame
-    let jsonRows = stmt.query('[\"Alice\"]')
+    let jsonRows = stmt.query([text(\"Alice\")])
     ```
     ")
-    fn query(&self, paramsJson: String) -> String {
+    fn query(&self, params: [SqlParam]) -> String {
+        return self.db.query_params(self.sqlText, paramsToJson(params))
+    }
+
+    fn queryJson(&self, paramsJson: String) -> String {
         return self.db.query_params(self.sqlText, paramsJson)
     }
 
@@ -166,7 +209,11 @@ impl Transaction {
     let count = tx.executeParams(\"UPDATE accounts SET balance = balance + ?1 WHERE id = ?2\", [\"100.0\", 2])
     ```
     ")
-    fn executeParams(&self, sql: String, paramsJson: String) -> Int {
+    fn executeParams(&self, sql: String, params: [SqlParam]) -> Int {
+        return self.raw.execute_params(sql, paramsToJson(params))
+    }
+
+    fn executeParamsJson(&self, sql: String, paramsJson: String) -> Int {
         return self.raw.execute_params(sql, paramsJson)
     }
 
@@ -183,10 +230,14 @@ impl Transaction {
     @Docs("
     Runs a query inside the transaction with JSON parameters and returns rows as a JSON array string.
     ```flame
-    let rows = tx.queryParams(\"SELECT * FROM accounts WHERE id = ?1\", [\"1\"])
+    let rows = tx.queryParams(\"SELECT * FROM accounts WHERE id = ?1\", [integer(1)])
     ```
     ")
-    fn queryParams(&self, sql: String, paramsJson: String) -> String {
+    fn queryParams(&self, sql: String, params: [SqlParam]) -> String {
+        return self.raw.query_params(sql, paramsToJson(params))
+    }
+
+    fn queryParamsJson(&self, sql: String, paramsJson: String) -> String {
         return self.raw.query_params(sql, paramsJson)
     }
 
@@ -331,14 +382,18 @@ impl Database {
     }
 
     @Docs("
-    Executes a parameterized SQL statement with parameters passed as a JSON string.
-    Parameters can be a positional JSON array `'[\"Alice\", 30]'` or a named JSON object `'{\"name\": \"Alice\", \"age\": 30}'`.
+    Executes a parameterized SQL statement with typed positional parameters.
+    Use `text`, `integer`, `real`, `boolean`, or `nullParam` to construct values.
     Returns the count of modified rows (-1 on error).
     ```flame
-    db.executeParams(\"INSERT INTO users (name, age) VALUES (?1, ?2)\", '[\"Alice\", 30]')
+    db.executeParams(\"INSERT INTO users (name, age) VALUES (?1, ?2)\", [text(\"Alice\"), integer(30)])
     ```
     ")
-    fn executeParams(&self, sql: String, paramsJson: String) -> Int {
+    fn executeParams(&self, sql: String, params: [SqlParam]) -> Int {
+        return self.raw.execute_params(sql, paramsToJson(params))
+    }
+
+    fn executeParamsJson(&self, sql: String, paramsJson: String) -> Int {
         return self.raw.execute_params(sql, paramsJson)
     }
 
@@ -364,24 +419,46 @@ impl Database {
     }
 
     @Docs("
-    Executes a SQL query with parameters passed as a JSON string and returns all matching rows as a JSON array string.
-    Parameters can be a positional JSON array `'[50.0]'` or named JSON object `'{\"minPrice\": 50.0}'`.
+    Executes a SQL query with typed positional parameters and returns all matching rows as a JSON array string.
     ```flame
-    let rows = db.queryParams(\"SELECT * FROM items WHERE price < ?1\", '[50.0]')
+    let rows = db.queryParams(\"SELECT * FROM items WHERE price < ?1\", [real(50.0)])
     ```
     ")
-    fn queryParams(&self, sql: String, paramsJson: String) -> String {
+    fn queryParams(&self, sql: String, params: [SqlParam]) -> String {
+        return self.raw.query_params(sql, paramsToJson(params))
+    }
+
+    fn queryParamsJson(&self, sql: String, paramsJson: String) -> String {
         return self.raw.query_params(sql, paramsJson)
     }
 
     @Docs("
-    Executes a query with parameters passed as a JSON string and returns the first matching row as a single JSON object string, or an empty string if no rows match.
+    Executes a query with typed positional parameters and returns the first matching row as a JSON object string, or an empty string if no rows match.
     ```flame
-    let row = db.queryRow(\"SELECT * FROM config WHERE key = ?1\", '[\"theme\"]')
+    let row = db.queryRow(\"SELECT * FROM config WHERE key = ?1\", [text(\"theme\")])
     ```
     ")
-    fn queryRow(&self, sql: String, paramsJson: String) -> String {
+    fn queryRow(&self, sql: String, params: [SqlParam]) -> String {
+        return self.raw.query_row(sql, paramsToJson(params))
+    }
+
+    fn queryRowJson(&self, sql: String, paramsJson: String) -> String {
         return self.raw.query_row(sql, paramsJson)
+    }
+
+    @Docs("
+    Executes a query with typed positional parameters and returns the first column of the first row as a string.
+    Pass `[]` when the query has no parameters. Returns an empty string if no row is found.
+    ```flame
+    let name = db.queryString(\"SELECT name FROM users ORDER BY id DESC LIMIT 1\", [])
+    ```
+    ")
+    fn queryString(&self, sql: String, params: [SqlParam]) -> String {
+        return self.raw.query_string(sql, paramsToJson(params))
+    }
+
+    fn queryStringJson(&self, sql: String, paramsJson: String) -> String {
+        return self.raw.query_string(sql, paramsJson)
     }
 
     // --- Prepared Statements ---

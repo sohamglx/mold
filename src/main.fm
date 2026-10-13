@@ -1,5 +1,3 @@
-package mold
-
 @Docs("
 # mold ⚡
 Fast, lightweight SQLite library for Flame powered by native Rust bindings.
@@ -23,6 +21,7 @@ println(rows)
 db.close()
 ```
 ")
+package mold
 
 import native.mold_sqlite
 import std.json

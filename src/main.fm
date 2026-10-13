@@ -1,15 +1,15 @@
 @Docs("
-# mold ⚡
-Fast, lightweight SQLite library for Flame powered by native Rust bindings.
+## mold
+Fast, lightweight SQLite library for Flame.
 
-## Features
+### Features
 - **File & In-Memory Databases**: Open persistent `.db` files or transient `:memory:` stores.
 - **Parameterized Queries**: Safe bindings using JSON parameter arrays `'[\"Alice\", 30]'` or named maps `'{\"name\": \"Alice\"}'`.
 - **Transactions & Savepoints**: ACID-compliant transactions with nested savepoints and rollbacks.
 - **Prepared Statements**: Reusable statements with schema reflection (`columnCount`, `columnNames`).
 - **Inspection & Diagnostics**: Table existence checks, schema metadata, and SQLite error trapping.
 
-## Quick Example
+### Quick Example
 ```flame
 import mold
 

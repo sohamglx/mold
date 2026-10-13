@@ -162,6 +162,55 @@ impl SqliteConnection {
         "".to_string()
     }
 
+    /// Return the first column of the first result row as a string.
+    pub fn query_string(&self, sql: String, params_json: String) -> String {
+        self.clear_error();
+        match self.with_conn(|conn| {
+            let params = parse_json_params(&params_json)?;
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let value = match &params {
+                JsonValue::Array(values) => {
+                    let sqlite_values: Vec<rusqlite::types::Value> =
+                        values.iter().map(json_to_sqlite_value).collect();
+                    let mut rows = stmt
+                        .query(rusqlite::params_from_iter(sqlite_values.iter()))
+                        .map_err(|e| e.to_string())?;
+                    first_column_as_string(&mut rows)?
+                }
+                JsonValue::Object(values) => {
+                    let named_values: Vec<(String, rusqlite::types::Value)> = values
+                        .iter()
+                        .map(|(key, value)| {
+                            let name = if key.starts_with(':')
+                                || key.starts_with('@')
+                                || key.starts_with('$')
+                            {
+                                key.clone()
+                            } else {
+                                format!(":{}", key)
+                            };
+                            (name, json_to_sqlite_value(value))
+                        })
+                        .collect();
+                    let refs: Vec<(&str, &dyn rusqlite::ToSql)> = named_values
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value as &dyn rusqlite::ToSql))
+                        .collect();
+                    let mut rows = stmt.query(refs.as_slice()).map_err(|e| e.to_string())?;
+                    first_column_as_string(&mut rows)?
+                }
+                _ => return Err("Parameters must be a JSON array or object".to_string()),
+            };
+            Ok(value.unwrap_or_default())
+        }) {
+            Ok(value) => value,
+            Err(error) => {
+                self.set_error(error);
+                String::new()
+            }
+        }
+    }
+
     /// Prepare a SQL statement and return a `SqliteStatement` struct instance.
     pub fn prepare(&self, sql: String) -> SqliteStatement {
         self.clear_error();
@@ -875,6 +924,23 @@ fn execute_query_to_json(
     Ok(rows_out)
 }
 
+fn first_column_as_string(rows: &mut rusqlite::Rows) -> Result<Option<String>, String> {
+    let Some(row) = rows.next().map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+
+    let value = match row.get_ref(0).map_err(|error| error.to_string())? {
+        rusqlite::types::ValueRef::Null => String::new(),
+        rusqlite::types::ValueRef::Integer(value) => value.to_string(),
+        rusqlite::types::ValueRef::Real(value) => value.to_string(),
+        rusqlite::types::ValueRef::Text(value) => std::str::from_utf8(value)
+            .map_err(|error| error.to_string())?
+            .to_string(),
+        rusqlite::types::ValueRef::Blob(value) => String::from_utf8_lossy(value).into_owned(),
+    };
+    Ok(Some(value))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -892,6 +958,13 @@ mod tests {
 
         let rows = db.query("SELECT * FROM users;".to_string());
         assert!(rows.contains("Alice"));
+        assert_eq!(
+            db.query_string(
+                "SELECT name FROM users WHERE id = ?1;".to_string(),
+                "[1]".to_string()
+            ),
+            "Alice"
+        );
 
         let stmt = db.prepare("SELECT name FROM users WHERE score > ?1;".to_string());
         assert_eq!(stmt.column_count(), 1);
@@ -923,4 +996,3 @@ mod tests {
         assert!(db.error().contains("no such table"));
     }
 }
-

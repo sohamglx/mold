@@ -1,0 +1,104 @@
+import src.main
+
+fn test(condition: Bool, message: String) {
+    if !condition {
+        println("FAILED: " + message)
+    } else {
+        println("PASSED: " + message)
+    }
+}
+
+@Test
+fn mainTest() {
+    let ver = main.sqliteVersion()
+    test(ver != "", "sqliteVersion returns version: " + ver)
+
+    // -------------------------------------------------------------
+    // Test 1: In-memory database
+    // -------------------------------------------------------------
+    let memDb = main.openInMemory()
+    test(memDb.isOpen(), "memDb.isOpen() is true")
+    test(memDb.isAutocommit(), "memDb.isAutocommit() is true")
+
+    let createRes = memDb.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score REAL)")
+    test(createRes >= 0, "CREATE TABLE in memory succeeded")
+
+    let insertRes = memDb.executeParams("INSERT INTO users (name, score) VALUES (?1, ?2)", '["Alice", 98.5]')
+    test(insertRes == 1, "INSERT returned 1 change")
+    test(memDb.lastInsertRowid() == 1, "lastInsertRowid is 1")
+
+    let rows = memDb.query("SELECT * FROM users")
+    test(rows != "", "query returned rows: " + rows)
+
+    let oneRow = memDb.queryRow("SELECT * FROM users WHERE id = ?1", '[1]')
+    test(oneRow != "", "queryRow returned: " + oneRow)
+
+    let stmt = memDb.prepare("SELECT name FROM users WHERE score > ?1")
+    test(stmt.columnCount() == 1, "columnCount is 1")
+    let names = stmt.columnNames()
+    test(names != "", "columnNames returned: " + names)
+    let stmtRows = stmt.query('[90.0]')
+    test(stmtRows != "", "stmt.query returned: " + stmtRows)
+
+    let tx = memDb.transaction()
+    tx.execute("INSERT INTO users (name, score) VALUES ('Bob', 85.0)")
+    test(tx.isActive(), "tx.isActive() is true")
+    tx.savepoint("sp1")
+    tx.execute("INSERT INTO users (name, score) VALUES ('Charlie', 70.0)")
+    tx.rollbackTo("sp1")
+    tx.commit()
+
+    let exists = memDb.tableExists("users")
+    test(exists, "tableExists(users) is true")
+
+    let tables = memDb.tableNames()
+    test(tables != "", "tableNames: " + tables)
+
+    let info = memDb.tableInfo("users")
+    test(info != "", "tableInfo: " + info)
+
+    memDb.close()
+    test(!memDb.isOpen(), "memDb.close() closed in-memory connection")
+
+    // -------------------------------------------------------------
+    // Test 2: Disk database (file-based SQLite database)
+    // -------------------------------------------------------------
+    let diskDb = main.open("test.db")
+    test(diskDb.isOpen(), "diskDb.isOpen() is true for test.db")
+
+    diskDb.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, title TEXT, price REAL) STRICT")
+    let diskInsert = diskDb.executeParams("INSERT INTO items (title, price) VALUES (?1, ?2)", '["Book", 19.99]')
+    test(diskInsert >= 0, "diskDb.executeParams succeeded")
+
+    let diskRows = diskDb.query("SELECT * FROM items")
+    test(diskRows != "", "diskDb.query returned rows from test.db: " + diskRows)
+
+    let diskTx = diskDb.transaction()
+    diskTx.executeParams("INSERT INTO items (title, price) VALUES (?1, ?2)", '["Pen", 2.50]')
+    diskTx.commit()
+
+    let okTimeout = diskDb.setBusyTimeout(2000)
+    test(okTimeout, "setBusyTimeout succeeded")
+
+    let okVacuum = diskDb.vacuum()
+    test(okVacuum, "vacuum succeeded on disk database")
+
+    // -------------------------------------------------------------
+    // Test 3: Error reporting & schema validation
+    // -------------------------------------------------------------
+    // In STRICT mode, inserting invalid datatype triggers a hard SQLite error
+    diskDb.execute("INSERT INTO items (title, price) VALUES ('Ruler', 'NOT_A_PRICE')")
+    test(diskDb.hasError(), "hasError() detected STRICT column datatype mismatch")
+    let errStr = diskDb.error()
+    test(errStr != "", "error message captured: " + errStr)
+
+    // Invalid SQL syntax error detection
+    diskDb.execute("THIS IS INVALID SQL STATEMENT")
+    test(diskDb.hasError(), "hasError() detected syntax error")
+
+    let diskClosed = diskDb.close()
+    test(diskClosed, "diskDb.close() succeeded")
+    test(!diskDb.isOpen(), "diskDb is closed")
+
+    println("All SQLite tests (memory + disk + error handling) passed successfully!")
+}

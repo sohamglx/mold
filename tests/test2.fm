@@ -1,0 +1,24 @@
+import src.main
+
+let app = main.open("app.db")
+app.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)")
+app.executeParams("INSERT INTO users (name, age) VALUES (?1, ?2)", '["Alice", 30]')
+let rows = app.query("SELECT * FROM users")
+println(rows)
+
+let stmt = app.prepare("SELECT name FROM users WHERE age > ?1")
+println("stmt prepared successfully!")
+println("stmt.sql: " + stmt.sql())
+println("stmt.id: " + stmt.id().toString())
+println("stmt.columnCount: " + stmt.columnCount().toString())
+println("stmt.columnNames: " + stmt.columnNames())
+let stmtRows = stmt.query('[20]')
+println("Stmt rows: " + stmtRows)
+
+// Testing error handling on invalid schema:
+app.execute("INSERT INTO users (invalid_column) VALUES ('Bob')")
+if app.hasError() {
+    println("Captured SQLite error: " + app.error())
+}
+
+app.close()

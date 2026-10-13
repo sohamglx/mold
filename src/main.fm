@@ -1,0 +1,714 @@
+package mold
+
+@Docs("
+# mold ⚡
+Fast, lightweight SQLite library for Flame powered by native Rust bindings.
+
+## Features
+- **File & In-Memory Databases**: Open persistent `.db` files or transient `:memory:` stores.
+- **Parameterized Queries**: Safe bindings using JSON parameter arrays `'[\"Alice\", 30]'` or named maps `'{\"name\": \"Alice\"}'`.
+- **Transactions & Savepoints**: ACID-compliant transactions with nested savepoints and rollbacks.
+- **Prepared Statements**: Reusable statements with schema reflection (`columnCount`, `columnNames`).
+- **Inspection & Diagnostics**: Table existence checks, schema metadata, and SQLite error trapping.
+
+## Quick Example
+```flame
+import mold
+
+let db = mold.open(\"app.db\")
+db.execute(\"CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)\")
+db.executeParams(\"INSERT INTO users (name, age) VALUES (?1, ?2)\", '[\"Alice\", 30]')
+let rows = db.query(\"SELECT * FROM users\")
+println(rows)
+db.close()
+```
+")
+
+import native.mold_sqlite
+import std.json
+
+@Docs("
+### ColumnInfo
+Represents schema metadata for a database column as returned by `PRAGMA table_info`.
+- `cid`: Column ID / 0-based index.
+- `name`: Column name.
+- `typeName`: Declared SQLite column data type (e.g. `INTEGER`, `TEXT`, `REAL`).
+- `notNull`: Non-zero if column has a `NOT NULL` constraint.
+- `dfltValue`: Default value formula or literal, if any.
+- `pk`: Non-zero if part of the primary key.
+")
+export struct ColumnInfo {
+    cid: Int,
+    name: String,
+    typeName: String,
+    notNull: Int,
+    dfltValue: String?,
+    pk: Int
+}
+
+@Docs("
+### Statement
+A pre-compiled SQLite statement handle for repeated, high-performance execution.
+
+```flame
+let stmt = db.prepare(\"SELECT * FROM users WHERE id = ?1\")
+let row = stmt.query('[\"101\"]')
+```
+")
+export struct Statement {
+    db: SqliteConnection,
+    sqlText: String
+}
+
+impl Statement {
+    @Docs("
+    Returns the unique statement handle ID.
+    ```flame
+    let id = stmt.id()
+    ```
+    ")
+    fn id(&self) -> Int {
+        return 1
+    }
+
+    @Docs("
+    Executes the prepared statement with JSON parameters (positional array `[val1, val2]` or named object `{\"name\": val}`).
+    Returns the count of modified rows (-1 on error).
+    ```flame
+    let count = stmt.execute('[\"Alice\", 25]')
+    ```
+    ")
+    fn execute(&self, paramsJson: String) -> Int {
+        return self.db.execute_params(self.sqlText, paramsJson)
+    }
+
+    @Docs("
+    Executes a query using the prepared statement with JSON parameters, returning all matching rows as a JSON array string.
+    ```flame
+    let jsonRows = stmt.query('[\"Alice\"]')
+    ```
+    ")
+    fn query(&self, paramsJson: String) -> String {
+        return self.db.query_params(self.sqlText, paramsJson)
+    }
+
+    @Docs("
+    Returns the number of columns produced by this prepared statement.
+    ```flame
+    let count = stmt.columnCount()
+    ```
+    ")
+    fn columnCount(&self) -> Int {
+        return self.db.stmt_column_count(self.sqlText)
+    }
+
+    @Docs("
+    Returns the names of all result columns as a JSON array string `[\"id\", \"name\", \"score\"]`.
+    ```flame
+    let names = stmt.columnNames()
+    ```
+    ")
+    fn columnNames(&self) -> String {
+        return self.db.stmt_column_names(self.sqlText)
+    }
+
+    @Docs("
+    Returns the original SQL query text used to prepare this statement.
+    ```flame
+    let sqlText = stmt.sql()
+    ```
+    ")
+    fn sql(&self) -> String {
+        return self.sqlText
+    }
+
+    @Docs("
+    Returns any error message encountered during statement execution, or an empty string.
+    ```flame
+    let err = stmt.error()
+    ```
+    ")
+    fn error(&self) -> String {
+        return self.db.error()
+    }
+}
+
+@Docs("
+### Transaction
+An active SQLite transaction handle providing ACID guarantees.
+Must be finalized with `commit()` or `rollback()`. Supports nested savepoints.
+
+```flame
+let tx = db.transaction()
+tx.execute(\"INSERT INTO logs (msg) VALUES ('started')\")
+tx.commit()
+```
+")
+export struct Transaction {
+    raw: SqliteTransaction
+}
+
+impl Transaction {
+    @Docs("
+    Executes a SQL statement inside the transaction without parameters.
+    Returns the count of modified rows (-1 on error).
+    ```flame
+    let count = tx.execute(\"UPDATE accounts SET balance = balance - 100 WHERE id = 1\")
+    ```
+    ")
+    fn execute(&self, sql: String) -> Int {
+        return self.raw.execute(sql)
+    }
+
+    @Docs("
+    Executes a parameterized SQL statement inside the transaction with JSON parameters.
+    Returns the count of modified rows (-1 on error).
+    ```flame
+    let count = tx.executeParams(\"UPDATE accounts SET balance = balance + ?1 WHERE id = ?2\", [\"100.0\", 2])
+    ```
+    ")
+    fn executeParams(&self, sql: String, paramsJson: String) -> Int {
+        return self.raw.execute_params(sql, paramsJson)
+    }
+
+    @Docs("
+    Runs a query inside the transaction without parameters and returns rows as a JSON array string.
+    ```flame
+    let rows = tx.query(\"SELECT * FROM accounts WHERE id = 1\")
+    ```
+    ")
+    fn query(&self, sql: String) -> String {
+        return self.raw.query(sql)
+    }
+
+    @Docs("
+    Runs a query inside the transaction with JSON parameters and returns rows as a JSON array string.
+    ```flame
+    let rows = tx.queryParams(\"SELECT * FROM accounts WHERE id = ?1\", [\"1\"])
+    ```
+    ")
+    fn queryParams(&self, sql: String, paramsJson: String) -> String {
+        return self.raw.query_params(sql, paramsJson)
+    }
+
+    @Docs("
+    Commits the transaction to disk. Returns true on success.
+    ```flame
+    let ok = tx.commit()
+    ```
+    ")
+    fn commit(&self) -> Bool {
+        return self.raw.commit()
+    }
+
+    @Docs("
+    Rolls back all changes made within this transaction. Returns true on success.
+    ```flame
+    let ok = tx.rollback()
+    ```
+    ")
+    fn rollback(&self) -> Bool {
+        return self.raw.rollback()
+    }
+
+    @Docs("
+    Creates a named savepoint within this transaction for nested sub-transaction rollbacks.
+    ```flame
+    let ok = tx.savepoint(\"stage1\")
+    ```
+    ")
+    fn savepoint(&self, name: String) -> Bool {
+        return self.raw.savepoint(name)
+    }
+
+    @Docs("
+    Rolls back changes up to the specified named savepoint.
+    ```flame
+    let ok = tx.rollbackTo(\"stage1\")
+    ```
+    ")
+    fn rollbackTo(&self, name: String) -> Bool {
+        return self.raw.rollback_to(name)
+    }
+
+    @Docs("
+    Releases and finalizes a named savepoint.
+    ```flame
+    let ok = tx.releaseSavepoint(\"stage1\")
+    ```
+    ")
+    fn releaseSavepoint(&self, name: String) -> Bool {
+        return self.raw.release_savepoint(name)
+    }
+
+    @Docs("
+    Returns true if the transaction is currently active and not yet committed or rolled back.
+    ```flame
+    if tx.isActive() {
+        tx.rollback()
+    }
+    ```
+    ")
+    fn isActive(&self) -> Bool {
+        return self.raw.is_active()
+    }
+
+    @Docs("
+    Returns any error message encountered during transaction execution, or an empty string.
+    ```flame
+    let err = tx.error()
+    ```
+    ")
+    fn error(&self) -> String {
+        return self.raw.error()
+    }
+}
+
+@Docs("
+### Database
+Primary connection handle to a SQLite database instance.
+Provides direct SQL execution, querying, transactions, statement preparation, and administrative utilities.
+
+```flame
+let db = Database.openInMemory()
+db.execute(\"CREATE TABLE items (id INT, name TEXT)\")
+```
+")
+export struct Database {
+    raw: SqliteConnection
+}
+
+impl Database {
+    // --- Constructors ---
+
+    @Docs("
+    Opens or creates a SQLite database file at `path`.
+    ```flame
+    let db = Database.open(\"app.db\")
+    ```
+    ")
+    fn open(path: String) -> Database {
+        let conn = mold_sqlite.open(path)
+        return Database {raw: conn}
+    }
+
+    @Docs("
+    Opens a private, volatile in-memory SQLite database.
+    Data resides entirely in RAM and is discarded when closed.
+    ```flame
+    let db = Database.openInMemory()
+    ```
+    ")
+    fn openInMemory() -> Database {
+        let conn = mold_sqlite.open_in_memory()
+        return Database {raw: conn}
+    }
+
+    @Docs("
+    Opens a SQLite database with specific permissions:
+    - `path`: Path to SQLite database file.
+    - `readOnly`: Open in read-only mode if true, otherwise read-write.
+    - `create`: Automatically create the database file if it does not exist.
+    ```flame
+    let db = Database.openWithFlags(\"data.db\", false, true)
+    ```
+    ")
+    fn openWithFlags(path: String, readOnly: Bool, create: Bool) -> Database {
+        let conn = mold_sqlite.open_with_flags(path, readOnly, create)
+        return Database {raw: conn}
+    }
+
+    // --- Execution & Queries ---
+
+    @Docs("
+    Executes a single SQL statement without parameters (such as DDL `CREATE TABLE` or DML `INSERT`).
+    Returns the count of modified rows (-1 on error).
+    ```flame
+    let changes = db.execute(\"DELETE FROM sessions WHERE expired = 1\")
+    ```
+    ")
+    fn execute(&self, sql: String) -> Int {
+        return self.raw.execute(sql)
+    }
+
+    @Docs("
+    Executes a parameterized SQL statement with parameters passed as a JSON string.
+    Parameters can be a positional JSON array `'[\"Alice\", 30]'` or a named JSON object `'{\"name\": \"Alice\", \"age\": 30}'`.
+    Returns the count of modified rows (-1 on error).
+    ```flame
+    db.executeParams(\"INSERT INTO users (name, age) VALUES (?1, ?2)\", '[\"Alice\", 30]')
+    ```
+    ")
+    fn executeParams(&self, sql: String, paramsJson: String) -> Int {
+        return self.raw.execute_params(sql, paramsJson)
+    }
+
+    @Docs("
+    Executes a batch of multiple semicolon-separated SQL statements.
+    Ideal for migration scripts, schema creation, and bulk initializations.
+    ```flame
+    db.executeBatch(\"CREATE TABLE a (id INT); CREATE TABLE b (id INT);\")
+    ```
+    ")
+    fn executeBatch(&self, sql: String) -> Bool {
+        return self.raw.execute_batch(sql)
+    }
+
+    @Docs("
+    Executes a SQL query without parameters and returns all rows as a JSON array string.
+    ```flame
+    let rows = db.query(\"SELECT id, name FROM users\")
+    ```
+    ")
+    fn query(&self, sql: String) -> String {
+        return self.raw.query(sql)
+    }
+
+    @Docs("
+    Executes a SQL query with parameters passed as a JSON string and returns all matching rows as a JSON array string.
+    Parameters can be a positional JSON array `'[50.0]'` or named JSON object `'{\"minPrice\": 50.0}'`.
+    ```flame
+    let rows = db.queryParams(\"SELECT * FROM items WHERE price < ?1\", '[50.0]')
+    ```
+    ")
+    fn queryParams(&self, sql: String, paramsJson: String) -> String {
+        return self.raw.query_params(sql, paramsJson)
+    }
+
+    @Docs("
+    Executes a query with parameters passed as a JSON string and returns the first matching row as a single JSON object string, or an empty string if no rows match.
+    ```flame
+    let row = db.queryRow(\"SELECT * FROM config WHERE key = ?1\", '[\"theme\"]')
+    ```
+    ")
+    fn queryRow(&self, sql: String, paramsJson: String) -> String {
+        return self.raw.query_row(sql, paramsJson)
+    }
+
+    // --- Prepared Statements ---
+
+    @Docs("
+    Compiles a SQL statement into a reusable `Statement` handle.
+    ```flame
+    let stmt = db.prepare(\"SELECT * FROM accounts WHERE id = ?1\")
+    ```
+    ")
+    fn prepare(&self, sql: String) -> Statement {
+        return Statement {
+            db: self.raw,
+            sqlText: sql
+        }
+    }
+
+    // --- Transactions ---
+
+    @Docs("
+    Begins a new managed transaction and returns a `Transaction` handle.
+    ```flame
+    let tx = db.transaction()
+    tx.execute(\"UPDATE balances SET val = val - 10 WHERE id = 1\")
+    tx.execute(\"UPDATE balances SET val = val + 10 WHERE id = 2\")
+    tx.commit()
+    ```
+    ")
+    fn transaction(&self) -> Transaction {
+        let tx = self.raw.transaction()
+        return Transaction {raw: tx}
+    }
+
+    @Docs("
+    Executes `BEGIN TRANSACTION;` directly on the database connection.
+    ```flame
+    let ok = db.begin()
+    ```
+    ")
+    fn begin(&self) -> Bool {
+        return self.raw.begin()
+    }
+
+    @Docs("
+    Executes `BEGIN IMMEDIATE TRANSACTION;` acquiring a write lock immediately.
+    ```flame
+    let ok = db.beginImmediate()
+    ```
+    ")
+    fn beginImmediate(&self) -> Bool {
+        return self.raw.begin_immediate()
+    }
+
+    @Docs("
+    Executes `BEGIN EXCLUSIVE TRANSACTION;` preventing all other concurrent reads and writes.
+    ```flame
+    let ok = db.beginExclusive()
+    ```
+    ")
+    fn beginExclusive(&self) -> Bool {
+        return self.raw.begin_exclusive()
+    }
+
+    @Docs("
+    Commits the current active transaction to disk.
+    ```flame
+    let ok = db.commit()
+    ```
+    ")
+    fn commit(&self) -> Bool {
+        return self.raw.commit()
+    }
+
+    @Docs("
+    Rolls back all uncommitted changes from the current active transaction.
+    ```flame
+    let ok = db.rollback()
+    ```
+    ")
+    fn rollback(&self) -> Bool {
+        return self.raw.rollback()
+    }
+
+    @Docs("
+    Creates a named savepoint for fine-grained sub-transaction control.
+    ```flame
+    let ok = db.savepoint(\"sp1\")
+    ```
+    ")
+    fn savepoint(&self, name: String) -> Bool {
+        return self.raw.savepoint(name)
+    }
+
+    @Docs("
+    Rolls back transaction changes up to the specified named savepoint.
+    ```flame
+    let ok = db.rollbackTo(\"sp1\")
+    ```
+    ")
+    fn rollbackTo(&self, name: String) -> Bool {
+        return self.raw.rollback_to(name)
+    }
+
+    @Docs("
+    Releases and finalizes a named savepoint.
+    ```flame
+    let ok = db.releaseSavepoint(\"sp1\")
+    ```
+    ")
+    fn releaseSavepoint(&self, name: String) -> Bool {
+        return self.raw.release_savepoint(name)
+    }
+
+    // --- Diagnostics & Status ---
+
+    @Docs("
+    Returns the 64-bit integer rowid generated by the most recent successful `INSERT`.
+    ```flame
+    let id = db.lastInsertRowid()
+    ```
+    ")
+    fn lastInsertRowid(&self) -> Int {
+        return self.raw.last_insert_rowid()
+    }
+
+    @Docs("
+    Returns the number of database rows inserted, modified, or deleted by the most recently executed statement.
+    ```flame
+    let count = db.changes()
+    ```
+    ")
+    fn changes(&self) -> Int {
+        return self.raw.changes()
+    }
+
+    @Docs("
+    Returns the cumulative count of row changes across all statements since opening this connection.
+    ```flame
+    let total = db.totalChanges()
+    ```
+    ")
+    fn totalChanges(&self) -> Int {
+        return self.raw.total_changes()
+    }
+
+    @Docs("
+    Returns true if the database connection is currently in autocommit mode (not inside an active transaction).
+    ```flame
+    let auto = db.isAutocommit()
+    ```
+    ")
+    fn isAutocommit(&self) -> Bool {
+        return self.raw.is_autocommit()
+    }
+
+    @Docs("
+    Returns true if the connection is active and open.
+    ```flame
+    if db.isOpen() {
+        println(\"Database is ready\")
+    }
+    ```
+    ")
+    fn isOpen(&self) -> Bool {
+        return self.raw.is_open()
+    }
+
+    @Docs("
+    Returns the most recent error message recorded on this connection, or an empty string.
+    ```flame
+    let err = db.error()
+    ```
+    ")
+    fn error(&self) -> String {
+        return self.raw.error()
+    }
+
+    @Docs("
+    Returns true if the most recent database operation encountered an error.
+    ```flame
+    if db.hasError() {
+        println(\"Error: \" + db.error())
+    }
+    ```
+    ")
+    fn hasError(&self) -> Bool {
+        return self.raw.has_error()
+    }
+
+    @Docs("
+    Closes the underlying database connection and releases all resources.
+    ```flame
+    let ok = db.close()
+    ```
+    ")
+    fn close(&mut self) -> Bool {
+        return self.raw.close()
+    }
+
+    @Docs("
+    Interrupts any long-running query or operation executing concurrently on this connection.
+    ```flame
+    db.interrupt()
+    ```
+    ")
+    fn interrupt(&self) -> Bool {
+        return self.raw.interrupt()
+    }
+
+    @Docs("
+    Configures SQLite's internal busy handler timeout in milliseconds.
+    Waits up to `ms` milliseconds when encountering a locked database before failing.
+    ```flame
+    db.setBusyTimeout(5000)
+    ```
+    ")
+    fn setBusyTimeout(&self, ms: Int) -> Bool {
+        return self.raw.set_busy_timeout(ms)
+    }
+
+    @Docs("
+    Executes `VACUUM;` to rebuild the entire database file, defragmenting storage and reducing file size.
+    ```flame
+    let ok = db.vacuum()
+    ```
+    ")
+    fn vacuum(&self) -> Bool {
+        return self.raw.vacuum()
+    }
+
+    @Docs("
+    Performs an online, zero-downtime backup of the current database into `targetPath`.
+    ```flame
+    let ok = db.backupTo(\"backup.db\")
+    ```
+    ")
+    fn backupTo(&self, targetPath: String) -> Bool {
+        return self.raw.backup_to(targetPath)
+    }
+
+    // --- Schema Introspection ---
+
+    @Docs("
+    Checks whether a table with `tableName` exists in `sqlite_master`.
+    ```flame
+    if db.tableExists(\"users\") {
+        println(\"Users table found!\")
+    }
+    ```
+    ")
+    fn tableExists(&self, tableName: String) -> Bool {
+        return self.raw.table_exists(tableName)
+    }
+
+    @Docs("
+    Returns all user-defined table names as a JSON array string `[\"users\", \"posts\", \"logs\"]`.
+    ```flame
+    let tables = db.tableNames()
+    ```
+    ")
+    fn tableNames(&self) -> String {
+        return self.raw.table_names()
+    }
+
+    @Docs("
+    Returns column metadata for `tableName` as a JSON array string via `PRAGMA table_info`.
+    ```flame
+    let schema = db.tableInfo(\"users\")
+    ```
+    ")
+    fn tableInfo(&self, tableName: String) -> String {
+        return self.raw.table_info(tableName)
+    }
+
+    @Docs("
+    Returns the underlying SQLite library version string (e.g. `\"3.46.1\"`).
+    ```flame
+    let v = db.version()
+    ```
+    ")
+    fn version(&self) -> String {
+        return mold_sqlite.sqlite_version()
+    }
+}
+
+// --- Package-level convenience functions ---
+
+@Docs("
+Opens or creates a SQLite database file at `path`.
+```flame
+let db = mold.open(\"app.db\")
+```
+")
+export fn open(path: String) -> Database {
+    return Database.open(path)
+}
+
+@Docs("
+Opens a private, volatile in-memory SQLite database.
+```flame
+let db = mold.openInMemory()
+```
+")
+export fn openInMemory() -> Database {
+    return Database.openInMemory()
+}
+
+@Docs("
+Opens a SQLite database with specific permissions:
+- `path`: Path to SQLite database file.
+- `readOnly`: Open in read-only mode if true, otherwise read-write.
+- `create`: Automatically create the database file if it does not exist.
+```flame
+let db = mold.openWithFlags(\"app.db\", false, true)
+```
+")
+export fn openWithFlags(path: String, readOnly: Bool, create: Bool) -> Database {
+    return Database.openWithFlags(path, readOnly, create)
+}
+
+@Docs("
+Returns the underlying SQLite library version string (e.g. `\"3.46.1\"`).
+```flame
+let ver = mold.sqliteVersion()
+```
+")
+export fn sqliteVersion() -> String {
+    return mold_sqlite.sqlite_version()
+}

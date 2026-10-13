@@ -1,4 +1,5 @@
 import src.main
+import std.json
 
 fn test(condition: Bool, message: String) {
     if !condition {
@@ -23,21 +24,29 @@ fn mainTest() {
     let createRes = memDb.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, score REAL)")
     test(createRes >= 0, "CREATE TABLE in memory succeeded")
 
-    let insertRes = memDb.executeParams("INSERT INTO users (name, score) VALUES (?1, ?2)", '["Alice", 98.5]')
+    let insertRes = memDb.executeParams("INSERT INTO users (name, score) VALUES (?1, ?2)", [main.text("Alice"), main.real(98.5)])
     test(insertRes == 1, "INSERT returned 1 change")
     test(memDb.lastInsertRowid() == 1, "lastInsertRowid is 1")
 
     let rows = memDb.query("SELECT * FROM users")
     test(rows != "", "query returned rows: " + rows)
+    let users = json.parse(rows)
+    test(users[0].name == "Alice", "query result supports users[0].name")
 
-    let oneRow = memDb.queryRow("SELECT * FROM users WHERE id = ?1", '[1]')
+    let filteredUsers = json.parse(memDb.queryParams(
+        "SELECT name FROM users WHERE score > ?1",
+        [main.real(90.0)]
+    ))
+    test(filteredUsers[0].name == "Alice", "queryParams accepts typed arrays and returns parsed rows")
+
+    let oneRow = memDb.queryRow("SELECT * FROM users WHERE id = ?1", [main.integer(1)])
     test(oneRow != "", "queryRow returned: " + oneRow)
 
     let stmt = memDb.prepare("SELECT name FROM users WHERE score > ?1")
     test(stmt.columnCount() == 1, "columnCount is 1")
     let names = stmt.columnNames()
     test(names != "", "columnNames returned: " + names)
-    let stmtRows = stmt.query('[90.0]')
+    let stmtRows = stmt.query([main.real(90.0)])
     test(stmtRows != "", "stmt.query returned: " + stmtRows)
 
     let tx = memDb.transaction()
@@ -67,14 +76,14 @@ fn mainTest() {
     test(diskDb.isOpen(), "diskDb.isOpen() is true for test.db")
 
     diskDb.execute("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY, title TEXT, price REAL) STRICT")
-    let diskInsert = diskDb.executeParams("INSERT INTO items (title, price) VALUES (?1, ?2)", '["Book", 19.99]')
+    let diskInsert = diskDb.executeParams("INSERT INTO items (title, price) VALUES (?1, ?2)", [main.text("Book"), main.real(19.99)])
     test(diskInsert >= 0, "diskDb.executeParams succeeded")
 
     let diskRows = diskDb.query("SELECT * FROM items")
     test(diskRows != "", "diskDb.query returned rows from test.db: " + diskRows)
 
     let diskTx = diskDb.transaction()
-    diskTx.executeParams("INSERT INTO items (title, price) VALUES (?1, ?2)", '["Pen", 2.50]')
+    diskTx.executeParams("INSERT INTO items (title, price) VALUES (?1, ?2)", [main.text("Pen"), main.real(2.50)])
     diskTx.commit()
 
     let okTimeout = diskDb.setBusyTimeout(2000)
